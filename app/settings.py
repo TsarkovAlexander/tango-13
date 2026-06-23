@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import AnyHttpUrl, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,6 +15,12 @@ class Settings(BaseSettings):
     temporal_start_enabled: bool = False
 
     sandbox_api_url: AnyHttpUrl | None = None
+    sandbox_backend: Literal["policy", "docker-gvisor"] = "policy"
+    sandbox_docker_image: str = "python:3.12-slim"
+    sandbox_docker_runtime: str = "runsc"
+    sandbox_docker_cpus: str = "1"
+    sandbox_docker_memory: str = "256m"
+    sandbox_docker_pids_limit: int = Field(default=64, ge=1)
     trace_http_url: AnyHttpUrl | None = None
     trace_stdout: bool = True
 

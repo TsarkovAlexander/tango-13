@@ -6,8 +6,9 @@ VENV_PYTHON := $(VENV)/bin/python
 VENV_PIP := $(VENV)/bin/pip
 UVICORN := $(VENV)/bin/uvicorn
 PYTEST := $(VENV)/bin/pytest
+GVISOR_LIMA_VM ?= tango-gvisor
 
-.PHONY: help init install build test check-temporal install-temporal-macos run-temporal run-api run-worker run-sandbox firecracker-smoke clean
+.PHONY: help init install build test check-temporal install-temporal-macos install-gvisor-macos gvisor-macos-shell run-temporal run-api run-worker run-sandbox run-sandbox-gvisor firecracker-smoke clean
 
 help:
 	@echo "Available targets:"
@@ -18,10 +19,14 @@ help:
 	@echo "  make check-temporal     Check whether Temporal CLI is installed"
 	@echo "  make install-temporal-macos"
 	@echo "                          Install Temporal CLI with Homebrew"
+	@echo "  make install-gvisor-macos"
+	@echo "                          Create a Lima Ubuntu VM and install Docker/gVisor inside it"
+	@echo "  make gvisor-macos-shell Open a shell in the Lima Docker/gVisor VM"
 	@echo "  make run-temporal       Run local Temporal dev server"
 	@echo "  make run-api            Run FastAPI app locally"
 	@echo "  make run-worker         Run Temporal worker locally"
 	@echo "  make run-sandbox        Run sandbox executor API locally"
+	@echo "  make run-sandbox-gvisor Run sandbox executor API with Docker/gVisor"
 	@echo "  make firecracker-smoke  Run Firecracker host smoke checks"
 	@echo "  make clean              Stop local dev processes and remove generated files"
 
@@ -59,6 +64,16 @@ check-temporal:
 install-temporal-macos:
 	brew install temporal
 
+# gVisor's runsc runtime is Linux-only. On macOS, install it inside a Lima VM.
+install-gvisor-macos:
+	@command -v brew >/dev/null || { echo "Homebrew is required for this target."; exit 1; }
+	@command -v limactl >/dev/null || brew install lima
+	@limactl list --format '{{.Name}}' | grep -qx "$(GVISOR_LIMA_VM)" || limactl start --name "$(GVISOR_LIMA_VM)" template://ubuntu
+	limactl shell "$(GVISOR_LIMA_VM)" -- bash -lc 'set -euo pipefail; sudo apt-get update; sudo apt-get install -y apt-transport-https ca-certificates curl gnupg docker.io; curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg; echo "deb [arch=$$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null; sudo apt-get update; sudo apt-get install -y runsc; sudo runsc install; sudo systemctl restart docker; sudo docker run --rm --runtime=runsc hello-world'
+
+gvisor-macos-shell:
+	limactl shell "$(GVISOR_LIMA_VM)"
+
 # Start the local Temporal dev server and UI.
 run-temporal: check-temporal
 	temporal server start-dev --namespace default
@@ -74,6 +89,10 @@ run-worker:
 # Start the local sandbox executor API used by the worker.
 run-sandbox:
 	$(UVICORN) sandbox_executor.server:app --reload --host 127.0.0.1 --port 8080
+
+# Start the local sandbox executor using Docker with the gVisor runsc runtime.
+run-sandbox-gvisor:
+	TANGO_SANDBOX_BACKEND=docker-gvisor $(UVICORN) sandbox_executor.server:app --reload --host 127.0.0.1 --port 8080
 
 # Run Firecracker readiness checks on a Linux/KVM sandbox host, not local macOS.
 firecracker-smoke:

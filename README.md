@@ -8,11 +8,11 @@ Temporal-orchestrated sandbox execution service with a FastAPI control plane and
 - `GET /runs/{id}/events` streams projection updates as server-sent events and closes after a terminal status.
 - `MultiAgentWorkflow` models deterministic Temporal workflow steps.
 - Temporal activities perform external work and emit replay-safe structured traces.
-- `sandbox_executor` exposes a policy-enforcing execution boundary that rejects network-like code and size violations.
+- `sandbox_executor` exposes a policy-enforcing execution boundary with a local Docker/gVisor executor option.
 - `spikes/firecracker_smoke` defines the first EC2 host validation gate for direct Firecracker execution.
 - `infra/terraform` provisions the private sandbox VPC, VPC endpoints, internal sandbox API load balancer, autoscaled `.metal` sandbox hosts, and Firecracker bootstrap checks.
 
-The local executor is a policy smoke implementation. It does not execute arbitrary code; production execution must be implemented behind the same `SandboxRequest`/`SandboxResult` boundary after the Firecracker smoke spike passes on target hosts.
+The default local executor is a policy smoke implementation. For local code execution on a Linux Docker host with gVisor installed, run the sandbox API with `TANGO_SANDBOX_BACKEND=docker-gvisor`. Production execution should stay behind the same `SandboxRequest`/`SandboxResult` boundary after the Firecracker smoke spike passes on target hosts.
 
 ## Full Local Temporal End-To-End Test
 
@@ -42,6 +42,38 @@ Temporal listens on `localhost:7233`; the local UI is available at `http://local
 
 ```bash
 make run-sandbox
+```
+
+To execute code locally through Docker with gVisor instead of the policy smoke executor, install `runsc` on a Linux Docker host and use:
+
+```bash
+make run-sandbox-gvisor
+```
+
+On macOS, `runsc` is not installed as a native Docker runtime. Use a Linux VM, for example Lima:
+
+```bash
+make install-gvisor-macos
+make gvisor-macos-shell
+```
+
+Inside the Lima shell, run the sandbox API from the repo checkout:
+
+```bash
+make install
+make run-sandbox-gvisor
+```
+
+Minimal `runsc` install on a direct Ubuntu/Linux host:
+
+```bash
+sudo apt-get update && sudo apt-get install -y apt-transport-https ca-certificates curl gnupg docker.io
+curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+sudo apt-get update && sudo apt-get install -y runsc
+sudo runsc install
+sudo systemctl restart docker
+docker run --rm --runtime=runsc hello-world
 ```
 
 4. Start the Temporal worker in Terminal 3:
@@ -94,14 +126,20 @@ Settings are read from environment variables with the `TANGO_` prefix:
 - `TANGO_TEMPORAL_ADDRESS`: Temporal frontend address. Default: `localhost:7233`.
 - `TANGO_TEMPORAL_NAMESPACE`: Temporal namespace. Default: `default`.
 - `TANGO_TEMPORAL_TASK_QUEUE`: worker task queue. Default: `tango-runs`.
-- `TANGO_SANDBOX_API_URL`: sandbox executor API URL. If unset, the sandbox activity uses the local policy executor directly.
+- `TANGO_SANDBOX_API_URL`: sandbox executor API URL. If unset, the sandbox activity uses the configured in-process sandbox backend.
+- `TANGO_SANDBOX_BACKEND`: `policy` for the default smoke executor or `docker-gvisor` for local Docker/gVisor execution. Default: `policy`.
+- `TANGO_SANDBOX_DOCKER_IMAGE`: Docker image used by the Docker/gVisor executor. Default: `python:3.12-slim`.
+- `TANGO_SANDBOX_DOCKER_RUNTIME`: Docker runtime used by the Docker/gVisor executor. Default: `runsc`.
+- `TANGO_SANDBOX_DOCKER_CPUS`, `TANGO_SANDBOX_DOCKER_MEMORY`, `TANGO_SANDBOX_DOCKER_PIDS_LIMIT`: local Docker/gVisor resource limits.
 - `TANGO_TRACE_STDOUT`: emit trace JSON to stdout. Default: `true`.
 - `TANGO_TRACE_HTTP_URL`: optional HTTP trace sink.
 - `TANGO_MAX_INPUT_BYTES`, `TANGO_MAX_OUTPUT_BYTES`, `TANGO_SANDBOX_TIMEOUT_SECONDS`: local sandbox policy limits.
 
 ## Isolation Model
 
-Untrusted code must not run in the API or Temporal worker process. Workers call the internal sandbox API, and the sandbox host is responsible for creating one fresh Firecracker microVM per run attempt with:
+Untrusted code must not run in the API or Temporal worker process. In local development, the Docker/gVisor backend runs one bounded container per attempt with `--runtime=runsc`, no network by default, a read-only root filesystem, tmpfs workspace, dropped capabilities, a non-root user, and CPU/memory/pid limits.
+
+For production, workers call the internal sandbox API, and the sandbox host is responsible for creating one fresh Firecracker microVM per run attempt with:
 
 - no guest network device by default;
 - read-only base image plus per-run writable overlay or tmpfs;

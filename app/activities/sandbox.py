@@ -7,7 +7,7 @@ from temporalio import activity
 
 from app.settings import get_settings
 from app.tracing import TraceEvent, emit_trace
-from sandbox_executor.firecracker import FirecrackerExecutor
+from sandbox_executor.executors import create_executor
 from sandbox_executor.policies import SandboxPolicy, SandboxRequest, SandboxResult
 
 
@@ -33,7 +33,14 @@ async def sandbox_step(payload: dict[str, Any]) -> dict[str, Any]:
 
     try:
         if settings.sandbox_api_url is None:
-            result = await FirecrackerExecutor().execute(request)
+            result = await create_executor(
+                settings.sandbox_backend,
+                docker_image=settings.sandbox_docker_image,
+                docker_runtime=settings.sandbox_docker_runtime,
+                docker_cpus=settings.sandbox_docker_cpus,
+                docker_memory=settings.sandbox_docker_memory,
+                docker_pids_limit=settings.sandbox_docker_pids_limit,
+            ).execute(request)
         else:
             async with httpx.AsyncClient(timeout=settings.sandbox_timeout_seconds) as client:
                 response = await client.post(
