@@ -1,0 +1,18 @@
+aws_region = "us-east-1"
+
+name_prefix = "tango"
+environment = "prod"
+
+sandbox_ami_id        = "ami-0123456789abcdef0"
+sandbox_instance_type = "c7i.large"
+sandbox_host_count    = 1
+
+vpc_cidr            = "10.42.0.0/16"
+sandbox_subnet_cidr = "10.42.10.0/24"
+sandbox_api_port    = 8080
+
+sandbox_host_disable_api_termination = true
+
+additional_tags = {
+  Owner = "platform"
+}
