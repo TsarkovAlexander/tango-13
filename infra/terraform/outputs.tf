@@ -18,14 +18,24 @@ output "vpc_endpoint_security_group_id" {
   value       = aws_security_group.vpc_endpoint.id
 }
 
-output "sandbox_host_instance_ids" {
-  description = "IDs of sandbox EC2 hosts."
-  value       = aws_instance.sandbox_host[*].id
+output "sandbox_api_load_balancer_dns_name" {
+  description = "Private DNS name of the internal sandbox API load balancer."
+  value       = aws_lb.sandbox_api.dns_name
 }
 
-output "sandbox_host_private_ips" {
-  description = "Private IPs of sandbox EC2 hosts."
-  value       = aws_instance.sandbox_host[*].private_ip
+output "sandbox_api_url" {
+  description = "Private sandbox executor API URL for Temporal worker configuration."
+  value       = "http://${aws_lb.sandbox_api.dns_name}:${var.sandbox_api_port}"
+}
+
+output "sandbox_host_autoscaling_group_name" {
+  description = "Name of the autoscaling group managing sandbox hosts."
+  value       = aws_autoscaling_group.sandbox_host.name
+}
+
+output "sandbox_host_launch_template_id" {
+  description = "ID of the launch template used for sandbox hosts."
+  value       = aws_launch_template.sandbox_host.id
 }
 
 output "sandbox_kms_key_arn" {

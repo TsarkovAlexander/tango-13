@@ -37,6 +37,7 @@ data "aws_iam_policy_document" "sandbox_host" {
     sid = "AllowCloudWatchLogs"
     actions = [
       "logs:CreateLogStream",
+      "logs:DescribeLogStreams",
       "logs:PutLogEvents",
     ]
     resources = ["${aws_cloudwatch_log_group.sandbox.arn}:*"]

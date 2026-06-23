@@ -4,14 +4,20 @@ name_prefix = "tango"
 environment = "prod"
 
 sandbox_ami_id        = "ami-0123456789abcdef0"
-sandbox_instance_type = "c7i.large"
-sandbox_host_count    = 1
+sandbox_instance_type = "m7i.metal-24xl"
 
-vpc_cidr            = "10.42.0.0/16"
-sandbox_subnet_cidr = "10.42.10.0/24"
-sandbox_api_port    = 8080
+sandbox_host_min_size         = 1
+sandbox_host_desired_capacity = 1
+sandbox_host_max_size         = 2
+
+vpc_cidr                         = "10.42.0.0/16"
+sandbox_subnet_cidr              = "10.42.10.0/24"
+sandbox_api_port                 = 8080
+sandbox_api_health_check_path    = "/healthz"
+sandbox_api_allowed_cidr_blocks = ["10.42.0.0/16"]
 
 sandbox_host_disable_api_termination = true
+sandbox_api_lb_deletion_protection   = true
 
 additional_tags = {
   Owner = "platform"

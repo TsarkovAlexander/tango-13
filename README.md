@@ -10,7 +10,7 @@ Temporal-orchestrated sandbox execution service with a FastAPI control plane and
 - Temporal activities perform external work and emit replay-safe structured traces.
 - `sandbox_executor` exposes a policy-enforcing execution boundary that rejects network-like code and size violations.
 - `spikes/firecracker_smoke` defines the first EC2 host validation gate for direct Firecracker execution.
-- `infra/terraform` sketches the private sandbox VPC, VPC endpoints, sandbox host IAM, and no-public-IP EC2 hosts.
+- `infra/terraform` provisions the private sandbox VPC, VPC endpoints, internal sandbox API load balancer, autoscaled `.metal` sandbox hosts, and Firecracker bootstrap checks.
 
 The local executor is a policy smoke implementation. It does not execute arbitrary code; production execution must be implemented behind the same `SandboxRequest`/`SandboxResult` boundary after the Firecracker smoke spike passes on target hosts.
 
@@ -124,7 +124,9 @@ Activities emit Langfuse-style trace events through `app.tracing`. Raw payloads 
 
 ## AWS Hardening
 
-Sandbox hosts belong in private subnets with no NAT gateway and no public IPs. Required AWS control-plane access should use VPC endpoints for SSM, EC2 messages, CloudWatch Logs, KMS, and S3. Instance roles should be least privilege, IMDSv2 is required, and break-glass operator access should go through audited SSM Session Manager.
+Sandbox hosts belong in private subnets with no NAT gateway and no public IPs. Firecracker hosts must use KVM-capable EC2 `.metal` instances and pass bootstrap checks for `/dev/kvm`, matching Firecracker/jailer binaries, cgroups, swap policy, and required kernel/rootfs artifacts.
+
+Required AWS control-plane access should use VPC endpoints for SSM, EC2 messages, CloudWatch Logs, KMS, and S3. Instance roles should be least privilege, IMDSv2 is required, sandbox API ingress should flow through the internal load balancer, and break-glass operator access should go through audited SSM Session Manager.
 
 See `infra/terraform/README.md` for the AWS sandbox-host deployment baseline.
 

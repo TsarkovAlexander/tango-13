@@ -4,6 +4,10 @@ data "aws_availability_zones" "available" {
 
 data "aws_region" "current" {}
 
+locals {
+  sandbox_api_allowed_cidr_blocks = length(var.sandbox_api_allowed_cidr_blocks) > 0 ? var.sandbox_api_allowed_cidr_blocks : [var.vpc_cidr]
+}
+
 resource "aws_vpc" "sandbox" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
@@ -40,20 +44,47 @@ resource "aws_route_table_association" "sandbox" {
 
 resource "aws_security_group" "sandbox_host" {
   name        = "${var.name_prefix}-sandbox-host"
-  description = "Sandbox hosts accept only internal sandbox API traffic."
+  description = "Sandbox hosts accept executor API traffic only from the internal load balancer."
   vpc_id      = aws_vpc.sandbox.id
 
   ingress {
-    description = "Internal sandbox API"
-    from_port   = var.sandbox_api_port
-    to_port     = var.sandbox_api_port
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
+    description     = "Internal sandbox API from load balancer"
+    from_port       = var.sandbox_api_port
+    to_port         = var.sandbox_api_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.sandbox_api_lb.id]
   }
 
   tags = {
     Name = "${var.name_prefix}-sandbox-host"
   }
+}
+
+resource "aws_security_group" "sandbox_api_lb" {
+  name        = "${var.name_prefix}-sandbox-api-lb"
+  description = "Internal load balancer for sandbox executor API."
+  vpc_id      = aws_vpc.sandbox.id
+
+  ingress {
+    description = "Sandbox API callers"
+    from_port   = var.sandbox_api_port
+    to_port     = var.sandbox_api_port
+    protocol    = "tcp"
+    cidr_blocks = local.sandbox_api_allowed_cidr_blocks
+  }
+
+  tags = {
+    Name = "${var.name_prefix}-sandbox-api-lb"
+  }
+}
+
+resource "aws_vpc_security_group_egress_rule" "sandbox_api_lb_to_hosts" {
+  security_group_id            = aws_security_group.sandbox_api_lb.id
+  referenced_security_group_id = aws_security_group.sandbox_host.id
+  ip_protocol                  = "tcp"
+  from_port                    = var.sandbox_api_port
+  to_port                      = var.sandbox_api_port
+  description                  = "Allow load balancer to reach sandbox hosts."
 }
 
 resource "aws_security_group" "vpc_endpoint" {
