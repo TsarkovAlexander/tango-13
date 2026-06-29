@@ -1,70 +1,96 @@
-# Terraform AWS Deployment
+# Terraform AWS Infrastructure
 
-This directory provisions the first AWS sandbox-host baseline for Tango:
+This stack provisions the AWS resources used by Tango's Lambda MicroVM sandbox path:
 
-- isolated VPC and private sandbox subnet;
-- no public IPs and no NAT gateway;
-- VPC endpoints for private AWS control-plane access;
-- internal sandbox executor API load balancer;
-- autoscaled sandbox hosts with tightly scoped ingress and egress;
-- EC2 instance profile for SSM Session Manager and CloudWatch Logs;
-- customer-managed KMS encryption for logs and root volumes;
-- VPC flow logs for network auditability;
-- Firecracker bootstrap checks after each EC2 host launches.
+- S3 bucket for MicroVM image artifacts, with public access blocked, versioning enabled, and KMS encryption.
+- KMS key for MicroVM artifacts and logs.
+- CloudWatch log group for MicroVM build and runtime logs.
+- IAM roles for MicroVM image builds, MicroVM runtime execution, broker lifecycle calls, and operator smoke tests.
+- A broker AWS Lambda function and IAM-authenticated Lambda Function URL.
 
-This is infrastructure scaffolding for the sandbox host tier. It does not build the AMI or implement the per-request Firecracker lifecycle. The hardened AMI and sandbox executor are responsible for starting one jailed Firecracker microVM for each untrusted step.
+The broker Lambda uses the Terraform outputs to create, authenticate, call, and terminate one MicroVM for each sandbox attempt.
 
 ## Prerequisites
 
-- Terraform `>= 1.6`.
-- AWS CLI credentials configured for the target account.
-- Permission to create VPC, subnet, route table, VPC endpoint, EC2, IAM, KMS, VPC Flow Logs, and CloudWatch Logs resources.
-- A bare-metal EC2 instance type. Firecracker uses Linux KVM, and EC2 exposes KVM to guests only on `.metal` instances.
-- A hardened sandbox AMI with:
-  - a supported Linux host kernel, patched microcode, and `/dev/kvm`;
-  - matching Firecracker and jailer binaries installed and pinned;
-  - SSM agent installed;
-  - `tango-sandbox-executor.service` installed as a systemd unit;
-  - required kernel/rootfs artifacts;
-  - cgroups mounted and swap disabled unless explicitly accepted;
-  - successful `spikes/firecracker_smoke` validation on the target instance family.
+- Terraform `>= 1.15`.
+- AWS CLI credentials for the sandbox account.
+- Permission to manage S3, IAM, KMS, and CloudWatch Logs resources.
+- Access to the `lambda-microvms` AWS control plane in `us-east-1`.
 
-## Configure Variables
+## Remote State
 
-Copy `terraform.tfvars.example` to `terraform.tfvars` and edit the values:
+`backend.tf` is configured for the default sandbox remote state bucket:
 
-```hcl
-aws_region             = "us-east-1"
-name_prefix            = "tango"
-environment            = "prod"
-sandbox_ami_id         = "ami-xxxxxxxxxxxxxxxxx"
-sandbox_instance_type  = "m7i.metal-24xl"
-sandbox_host_min_size = 1
-sandbox_host_desired_capacity = 1
-sandbox_host_max_size = 2
-vpc_cidr               = "10.42.0.0/16"
-sandbox_subnet_cidr    = "10.42.10.0/24"
-sandbox_api_port       = 8080
-sandbox_api_health_check_path = "/healthz"
-sandbox_api_allowed_cidr_blocks = ["10.42.0.0/16"]
-sandbox_host_disable_api_termination = true
-sandbox_api_lb_deletion_protection = true
+```text
+bucket = "tango-test-569813798269-us-east-1-tf-state"
+key    = "tango/sandbox/terraform.tfstate"
+region = "us-east-1"
+use_lockfile = true
 ```
 
-Required variables:
+If the state bucket does not exist yet, create it out of band before running `terraform init`:
 
-- `aws_region`
-- `sandbox_ami_id`
+```bash
+aws s3api create-bucket \
+  --region us-east-1 \
+  --bucket tango-test-569813798269-us-east-1-tf-state
 
-Most other values have conservative defaults.
+aws s3api put-public-access-block \
+  --bucket tango-test-569813798269-us-east-1-tf-state \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 
-Before shared team or CI use, configure the commented S3 backend in `backend.tf` with your real state bucket and lock table.
+aws s3api put-bucket-versioning \
+  --bucket tango-test-569813798269-us-east-1-tf-state \
+  --versioning-configuration Status=Enabled
+
+aws s3api put-bucket-encryption \
+  --bucket tango-test-569813798269-us-east-1-tf-state \
+  --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+```
+
+The backend uses Terraform's S3 lockfile support, so no DynamoDB lock table is required. After creating the bucket, initialize this stack from `infra/terraform`:
+
+```bash
+terraform init
+```
+
+After changing existing backend settings, reinitialize with state migration:
+
+```bash
+terraform init -migrate-state
+```
+
+## Configure
+
+Create `terraform.tfvars` only when you need to override defaults:
+
+```hcl
+aws_region  = "us-east-1"
+name_prefix = "tango"
+environment = "test"
+
+microvm_image_name = "tango-sandbox-executor"
+
+# Defaults to the current account root when empty.
+microvm_operator_trusted_principal_arns = []
+
+# Service principal for the deployed broker workload.
+microvm_broker_trusted_services = ["lambda.amazonaws.com"]
+
+# Built with `make package-lambda-broker` from the repository root.
+lambda_broker_artifact_path = "../../dist/tango-broker-lambda.zip"
+```
+
+The stack validates both the AWS Region and sandbox account before applying.
 
 ## Deploy
 
-From `infra/terraform`:
+Package the broker Lambda artifact first, then deploy from `infra/terraform`:
 
 ```bash
+cd ../..
+make package-lambda-broker
+cd infra/terraform
 terraform init
 terraform fmt -check
 terraform validate
@@ -72,107 +98,126 @@ terraform plan -out tfplan
 terraform apply tfplan
 ```
 
-Key outputs include:
-
-- `vpc_id`
-- `sandbox_subnet_id`
-- `sandbox_security_group_id`
-- `vpc_endpoint_security_group_id`
-- `sandbox_api_load_balancer_dns_name`
-- `sandbox_api_url`
-- `sandbox_host_autoscaling_group_name`
-- `sandbox_host_launch_template_id`
-- `sandbox_kms_key_arn`
-- `sandbox_log_group_name`
-- `vpc_flow_log_group_name`
-
-Use `sandbox_api_url` as the private value for worker configuration such as `TANGO_SANDBOX_API_URL`.
-
-## Firecracker Isolation Model
-
-The Terraform layer isolates the sandbox host tier. Hosts run in a private subnet with no internet gateway, no NAT gateway, no public IPs, no SSH ingress, and egress limited to private AWS VPC endpoints needed for SSM, CloudWatch Logs, and KMS.
-
-The sandbox executor must isolate each untrusted step inside a fresh Firecracker microVM. In production it should launch Firecracker through the same-version `jailer`, place each microVM in a dedicated cgroup/chroot, drop privileges to a non-root UID/GID, enforce CPU/memory/disk/file-descriptor limits, and clean up the jail after execution.
-
-Untrusted microVMs should not be configured with Firecracker network interfaces or host TAP devices. Inputs and outputs should flow through bounded files or virtio-vsock when interactive exchange is required. Terraform's no-NAT VPC controls host egress, but guest network isolation depends on the executor never attaching guest networking for untrusted steps.
-
-## Bootstrap Behavior
-
-Each sandbox host launch template runs `scripts/firecracker_bootstrap.sh` through EC2 user data. The script is intentionally Firecracker-specific and offline-safe because the subnet has no NAT. It verifies:
-
-- Firecracker and jailer are installed and report the same version;
-- `/dev/kvm` exists and is accessible;
-- cgroups are mounted;
-- swap is disabled unless `ALLOW_SANDBOX_SWAP=true` is explicitly set;
-- kernel and rootfs artifacts exist under `/opt/tango/images`;
-- runtime directories such as `/srv/jailer` and `/var/lib/tango/sandbox` are root-owned and non-world-writable;
-- `tango-sandbox-executor.service` starts successfully.
-
-If any check fails, bootstrap exits non-zero and the host should stay unhealthy behind the internal load balancer.
-
-## Retry And Timeout Strategy
-
-Temporal owns workflow durability and activity retry. The infrastructure supports that model by keeping the API layer out of the execution path, placing the sandbox executor behind an internal load balancer, and letting the autoscaling group replace unhealthy sandbox hosts.
-
-Each sandbox activity should send a bounded, idempotent request to `sandbox_api_url`. The executor should enforce per-step wall-clock, CPU, memory, output-size, and disk limits. Temporal retries should use idempotency keys so a retried activity can safely ignore or clean up a previous failed attempt.
-
-## Verify Security Properties
-
-Check the Terraform plan before applying:
+Check the plan before applying:
 
 ```bash
 terraform show tfplan
 ```
 
-Confirm:
+Confirm the plan creates only the expected S3, KMS, CloudWatch Logs, IAM, Lambda, and Function URL resources.
 
-- sandbox EC2 launch template has `associate_public_ip_address = false`;
-- sandbox instance type is a `.metal` type validated for Firecracker/KVM;
-- the sandbox subnet route table has no default route to an internet gateway or NAT gateway;
-- interface VPC endpoints exist for SSM, SSM messages, EC2 messages, CloudWatch Logs, and KMS;
-- an S3 gateway endpoint is attached to the sandbox route table for future private S3 access;
-- sandbox host egress allows only HTTPS to the VPC endpoint security group;
-- sandbox host API ingress comes only from the internal load balancer security group;
-- the load balancer accepts sandbox API traffic only from `sandbox_api_allowed_cidr_blocks`;
-- IMDSv2 is required on sandbox EC2 instances;
-- root EBS volumes and CloudWatch log groups use the sandbox KMS key;
-- VPC flow logs are enabled;
-- IAM permissions are limited to SSM Session Manager and CloudWatch Logs writes.
+## Outputs
 
-## Connect To A Sandbox Host
+The broker and image build commands use these outputs:
 
-Use SSM Session Manager after the instance is online:
+- `microvm_artifact_bucket_uri`
+- `microvm_build_role_arn`
+- `microvm_execution_role_arn`
+- `microvm_broker_role_arn`
+- `microvm_log_group_name`
+- `microvm_base_image_arn`
+- `microvm_all_ingress_connector_arn`
+- `microvm_image_arn`
+- `lambda_broker_function_name`
+- `lambda_broker_function_url`
 
-```bash
-aws ssm start-session \
-  --region <aws-region> \
-  --target <instance-id>
-```
-
-There is no SSH ingress rule and no public IP by design.
-
-## Run Firecracker Smoke Check
-
-After connecting to a sandbox host, run the repository smoke check with host-specific paths:
+From `infra/terraform`, export the values needed by the Makefile:
 
 ```bash
-export FIRECRACKER_BIN=/usr/local/bin/firecracker
-export JAILER_BIN=/usr/local/bin/jailer
-export KERNEL_IMAGE=/opt/tango/images/vmlinux
-export ROOTFS_IMAGE=/opt/tango/images/rootfs.ext4
-
-spikes/firecracker_smoke/run.sh
+export AWS_REGION=us-east-1
+export MICROVM_S3_URI="$(terraform output -raw microvm_artifact_bucket_uri)/tango-microvm.zip"
+export MICROVM_BUILD_ROLE_ARN="$(terraform output -raw microvm_build_role_arn)"
+export MICROVM_EXECUTION_ROLE_ARN="$(terraform output -raw microvm_execution_role_arn)"
+export MICROVM_IMAGE_ARN="$(terraform output -raw microvm_image_arn)"
+export MICROVM_BASE_IMAGE_ARN="$(terraform output -raw microvm_base_image_arn)"
+export MICROVM_INGRESS_CONNECTOR_ARN="$(terraform output -raw microvm_all_ingress_connector_arn)"
+export MICROVM_LOG_GROUP_NAME="$(terraform output -raw microvm_log_group_name)"
+export TANGO_SANDBOX_API_URL="$(terraform output -raw lambda_broker_function_url)"
 ```
 
-The smoke check must pass before treating the instance family and AMI as valid for sandbox execution.
+## Build Or Update The Image
 
-## Production Hardening Notes
+From the repository root, package the MicroVM artifact and create the image the first time:
 
-Before multi-tenant production use, add an AMI build pipeline with signed artifacts, regular kernel and microcode patching, explicit SMT/KSM policy, swap disabled or encrypted, host vulnerability scanning, endpoint policies, stricter worker/control-plane CIDRs, multi-AZ subnets, and tenant quota enforcement.
+```bash
+make create-microvm-image
+```
 
-Firecracker itself does not filter guest egress traffic. The strongest setting for this workload is to omit guest network devices entirely. If guest networking is ever enabled for a different workload class, enforce host-level nftables or iptables filtering and explicitly block IMDS (`169.254.169.254`).
+For later image revisions:
 
-Guest-controlled logs and serial output must be bounded. Prefer disabling guest serial output for production, or route it to fixed-size buffers with rotation. Trace payloads should redact sensitive inputs and store large artifacts by reference.
+```bash
+make update-microvm-image
+```
+
+Check image status until create reports `CREATED` or update reports `UPDATED`:
+
+```bash
+aws lambda-microvms get-microvm-image \
+  --region "$AWS_REGION" \
+  --image-identifier "$MICROVM_IMAGE_ARN"
+```
+
+Rebuild the broker Lambda artifact before planning or applying Terraform changes that deploy updated broker code:
+
+```bash
+cd ../..
+make package-lambda-broker
+cd infra/terraform
+```
+
+## Smoke Test
+
+Run the broker locally against the deployed image:
+
+```bash
+TANGO_AWS_REGION="$AWS_REGION" \
+TANGO_LAMBDA_MICROVM_IMAGE_IDENTIFIER="$MICROVM_IMAGE_ARN" \
+TANGO_LAMBDA_MICROVM_EXECUTION_ROLE_ARN="$MICROVM_EXECUTION_ROLE_ARN" \
+make run-microvm-broker
+```
+
+Call the broker:
+
+```bash
+curl -s -X POST http://127.0.0.1:8081/execute \
+  -H "Content-Type: application/json" \
+  -d '{"run_id":"local-run-1","attempt_id":"attempt-1","code":"print(\"hello from aws microvm\")","input":{},"policy":{"version":"2026-06-23","allow_network":false,"timeout_seconds":10,"max_input_bytes":65536,"max_output_bytes":65536}}'
+```
+
+Expected result: `status` is `succeeded`, `output.stdout` includes `hello from aws microvm`, and the broker terminates the MicroVM.
+
+For a full local Temporal run, follow the root `README.md` end-to-end flow with `TANGO_SANDBOX_API_URL=http://127.0.0.1:8081` on the worker.
+
+For a full AWS broker Lambda run, deploy the broker Lambda and run the worker with the IAM-authenticated Function URL:
+
+```bash
+export TANGO_SANDBOX_API_URL="$(terraform output -raw lambda_broker_function_url)"
+
+TANGO_SANDBOX_API_URL="$TANGO_SANDBOX_API_URL" \
+TANGO_SANDBOX_API_AUTH=aws-iam \
+make run-worker
+```
+
+Then start the API with `TANGO_TEMPORAL_START_ENABLED=true`, submit `/runs`, and verify the SSE projection from the root `README.md` flow.
+
+## Security Checks
+
+Before applying, confirm:
+
+- The artifact bucket blocks public access, enforces bucket-owner ownership, enables versioning, uses KMS encryption, and denies insecure transport.
+- The MicroVM log group uses the KMS key and expected retention.
+- The build role can only read artifacts, decrypt with the artifact key, and write MicroVM build logs.
+- The execution role is limited to runtime log writes.
+- The broker role has MicroVM lifecycle actions, `iam:PassRole` for the scoped execution role, `lambda:PassNetworkConnector` scoped to the managed ingress/egress connector ARNs, and broker log writes.
+- The broker code still sends an empty `egressNetworkConnectors` list by default; any future use of the egress connector permission should require an explicit sandbox policy change.
+- The broker Lambda Function URL uses `AWS_IAM`, so callers need `lambda:InvokeFunctionUrl` permission and valid AWS credentials.
+- The operator role can upload artifacts, build images, run smoke tests, and pass only the build and execution roles to Lambda.
+
+## Production Hardening
+
+Before multi-tenant production use, add signed artifact publishing, image promotion controls, least-privilege operator principals, stricter broker trust configuration, tenant quotas, broker audit logs, log retention review, and an operational runbook for listing and terminating orphaned MicroVMs.
+
+Keep tenant secrets out of the MicroVM image snapshot. The broker passes non-secret run metadata through `runHookPayload`; pass secret references only when needed. Do not request egress connectors for untrusted runs unless a sandbox policy explicitly allows network access. If `run-microvm` returns `ServiceQuotaExceededException`, terminate idle MicroVMs or request a quota increase. If a MicroVM terminates unexpectedly, inspect `stateReason` from `get-microvm`.
 
 ## Destroy
 
@@ -186,8 +231,6 @@ Review the destroy plan carefully before confirming.
 
 ## Current Limitations
 
-- `backend.tf` contains a commented S3/DynamoDB backend template; fill it in before team or CI use.
-- No AMI build pipeline is included.
-- No production sandbox executor implementation or image rollout is defined here.
-- Multi-AZ sandbox subnets are not included yet.
-- The VPC endpoint list may need expansion if the AMI or runtime needs additional private AWS APIs.
+- No image promotion pipeline is included.
+- Lambda MicroVM image creation is still performed through AWS CLI commands outside Terraform.
+- The first secure implementation terminates each MicroVM after one attempt. Idle policy, suspend/resume, and pooling are intentionally deferred.

@@ -1,13 +1,17 @@
-# Configure remote state before using this module from CI or a shared team
-# environment. Backend settings cannot use Terraform variables, so keep the
-# concrete bucket/table names environment-specific.
+# Bootstrap the remote-state bucket and lock table first from:
+#   ../terraform-state
 #
-# terraform {
-#   backend "s3" {
-#     bucket         = "REPLACE_WITH_STATE_BUCKET"
-#     key            = "tango/sandbox/terraform.tfstate"
-#     region         = "us-east-1"
-#     dynamodb_table = "REPLACE_WITH_LOCK_TABLE"
-#     encrypt        = true
-#   }
-# }
+# Backend settings cannot use Terraform variables, so keep concrete names here.
+# Current bootstrap output:
+#   bucket         = "tango-test-569813798269-us-east-1-tf-state"
+#   dynamodb_table = "tango-test-tf-locks"
+#
+terraform {
+  backend "s3" {
+    bucket       = "tango-test-569813798269-us-east-1-tf-state"
+    key          = "tango/sandbox/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true
+    encrypt      = true
+  }
+}

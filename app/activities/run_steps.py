@@ -51,7 +51,7 @@ async def _traced_step(
                 status=status,
                 error=error,
                 duration_ms=duration_ms,
-                metadata={"input_ref": f"run-input:{payload['run_id']}"},
+                input_ref=f"run-input:{payload['run_id']}",
             ),
             settings,
         )

@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.6.0"
+  required_version = ">= 1.15.0"
 
   required_providers {
     aws = {
@@ -19,7 +19,13 @@ provider "aws" {
 
 variable "aws_region" {
   type        = string
-  description = "AWS region for the sandbox VPC."
+  description = "AWS region for Lambda MicroVM resources."
+  default     = "us-east-1"
+
+  validation {
+    condition     = var.aws_region == "us-east-1"
+    error_message = "aws_region must be us-east-1."
+  }
 }
 
 variable "name_prefix" {
@@ -36,7 +42,7 @@ variable "name_prefix" {
 variable "environment" {
   type        = string
   description = "Deployment environment name."
-  default     = "prod"
+  default     = "test"
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,30}$", var.environment))
@@ -50,63 +56,21 @@ variable "additional_tags" {
   default     = {}
 }
 
-variable "vpc_cidr" {
+variable "sandbox_account_id" {
   type        = string
-  description = "CIDR block for the isolated sandbox VPC."
-  default     = "10.42.0.0/16"
+  description = "Expected AWS sandbox account ID used as a guardrail for deployments."
+  default     = "569813798269"
 
   validation {
-    condition     = can(cidrhost(var.vpc_cidr, 0))
-    error_message = "vpc_cidr must be a valid IPv4 CIDR block."
+    condition     = can(regex("^[0-9]{12}$", var.sandbox_account_id))
+    error_message = "sandbox_account_id must be a 12-digit AWS account ID."
   }
 }
 
-variable "sandbox_subnet_cidr" {
-  type        = string
-  description = "CIDR block for sandbox hosts."
-  default     = "10.42.10.0/24"
-
-  validation {
-    condition     = can(cidrhost(var.sandbox_subnet_cidr, 0))
-    error_message = "sandbox_subnet_cidr must be a valid IPv4 CIDR block."
+check "sandbox_account" {
+  assert {
+    condition     = data.aws_caller_identity.current.account_id == var.sandbox_account_id
+    error_message = "Configure AWS credentials for sandbox account ${var.sandbox_account_id} before applying this stack."
   }
 }
 
-variable "sandbox_api_port" {
-  type        = number
-  description = "Internal sandbox executor API port."
-  default     = 8080
-
-  validation {
-    condition     = var.sandbox_api_port > 0 && var.sandbox_api_port <= 65535
-    error_message = "sandbox_api_port must be between 1 and 65535."
-  }
-}
-
-variable "sandbox_api_health_check_path" {
-  type        = string
-  description = "HTTP path used by the internal load balancer to health check sandbox executors."
-  default     = "/healthz"
-
-  validation {
-    condition     = startswith(var.sandbox_api_health_check_path, "/")
-    error_message = "sandbox_api_health_check_path must start with /."
-  }
-}
-
-variable "sandbox_api_allowed_cidr_blocks" {
-  type        = list(string)
-  description = "CIDR blocks allowed to call the internal sandbox executor API load balancer."
-  default     = []
-
-  validation {
-    condition     = alltrue([for cidr in var.sandbox_api_allowed_cidr_blocks : can(cidrhost(cidr, 0))])
-    error_message = "sandbox_api_allowed_cidr_blocks must contain valid IPv4 CIDR blocks."
-  }
-}
-
-variable "sandbox_api_lb_deletion_protection" {
-  type        = bool
-  description = "Whether to enable deletion protection for the internal sandbox API load balancer."
-  default     = true
-}

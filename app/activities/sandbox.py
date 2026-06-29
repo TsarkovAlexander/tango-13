@@ -1,8 +1,12 @@
+import json
 from time import monotonic
 from typing import Any
 from uuid import uuid4
 
 import httpx
+from botocore.awsrequest import AWSRequest
+from botocore.auth import SigV4Auth
+from botocore.session import get_session
 from temporalio import activity
 
 from app.settings import get_settings
@@ -33,20 +37,20 @@ async def sandbox_step(payload: dict[str, Any]) -> dict[str, Any]:
 
     try:
         if settings.sandbox_api_url is None:
-            result = await create_executor(
-                settings.sandbox_backend,
-                docker_image=settings.sandbox_docker_image,
-                docker_runtime=settings.sandbox_docker_runtime,
-                docker_cpus=settings.sandbox_docker_cpus,
-                docker_memory=settings.sandbox_docker_memory,
-                docker_pids_limit=settings.sandbox_docker_pids_limit,
-            ).execute(request)
+            result = await create_executor(settings.sandbox_backend).execute(request)
         else:
-            async with httpx.AsyncClient(timeout=settings.sandbox_timeout_seconds) as client:
-                response = await client.post(
-                    f"{str(settings.sandbox_api_url).rstrip('/')}/execute",
-                    json=request.model_dump(mode="json"),
-                )
+            broker_url = f"{str(settings.sandbox_api_url).rstrip('/')}/execute"
+            request_payload = request.model_dump(mode="json")
+            async with httpx.AsyncClient(timeout=settings.broker_timeout_seconds) as client:
+                if settings.sandbox_api_auth == "aws-iam":
+                    body = _json_body(request_payload)
+                    response = await client.post(
+                        broker_url,
+                        content=body,
+                        headers=_aws_sigv4_headers(broker_url, request_payload, settings.aws_region),
+                    )
+                else:
+                    response = await client.post(broker_url, json=request_payload)
                 response.raise_for_status()
                 result = SandboxResult.model_validate(response.json())
 
@@ -76,3 +80,18 @@ async def sandbox_step(payload: dict[str, Any]) -> dict[str, Any]:
             ),
             settings,
         )
+
+
+def _aws_sigv4_headers(url: str, payload: dict[str, Any], region: str) -> dict[str, str]:
+    body = _json_body(payload)
+    headers = {"Content-Type": "application/json"}
+    credentials = get_session().get_credentials()
+    if credentials is None:
+        raise RuntimeError("AWS credentials are required for TANGO_SANDBOX_API_AUTH=aws-iam")
+    request = AWSRequest(method="POST", url=url, data=body, headers=headers)
+    SigV4Auth(credentials.get_frozen_credentials(), "lambda", region).add_auth(request)
+    return dict(request.headers.items())
+
+
+def _json_body(payload: dict[str, Any]) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")

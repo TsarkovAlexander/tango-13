@@ -15,12 +15,18 @@ class Settings(BaseSettings):
     temporal_start_enabled: bool = False
 
     sandbox_api_url: AnyHttpUrl | None = None
-    sandbox_backend: Literal["policy", "docker-gvisor"] = "policy"
-    sandbox_docker_image: str = "python:3.12-slim"
-    sandbox_docker_runtime: str = "runsc"
-    sandbox_docker_cpus: str = "1"
-    sandbox_docker_memory: str = "256m"
-    sandbox_docker_pids_limit: int = Field(default=64, ge=1)
+    sandbox_api_auth: Literal["none", "aws-iam"] = "none"
+    sandbox_backend: Literal["policy", "microvm-python"] = "policy"
+    aws_region: str = "us-east-1"
+    lambda_microvm_image_identifier: str | None = None
+    lambda_microvm_image_version: str | None = None
+    lambda_microvm_execution_role_arn: str | None = None
+    lambda_microvm_auth_token_expiration_minutes: int = Field(default=5, ge=1)
+    lambda_microvm_port: int = Field(default=8080, ge=1, le=65535)
+    lambda_microvm_run_hook_payload_enabled: bool = False
+    lambda_microvm_wait_attempts: int = Field(default=20, ge=1)
+    lambda_microvm_wait_delay_seconds: float = Field(default=0.5, ge=0)
+    lambda_microvm_maximum_duration_seconds: int = Field(default=60, ge=1, le=28_800)
     trace_http_url: AnyHttpUrl | None = None
     trace_stdout: bool = True
 
@@ -28,6 +34,7 @@ class Settings(BaseSettings):
     max_input_bytes: int = Field(default=64 * 1024, ge=1)
     max_output_bytes: int = Field(default=64 * 1024, ge=1)
     sandbox_timeout_seconds: int = Field(default=10, ge=1)
+    broker_timeout_seconds: int = Field(default=30, ge=1)
 
 
 @lru_cache

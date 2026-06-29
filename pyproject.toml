@@ -9,8 +9,11 @@ description = "Temporal-orchestrated sandbox execution service"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "boto3",
+  "botocore[crt]",
   "fastapi",
   "httpx",
+  "mangum",
   "pydantic-settings",
   "temporalio",
   "uvicorn",

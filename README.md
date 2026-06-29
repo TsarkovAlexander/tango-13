@@ -1,6 +1,6 @@
 # tango-13
 
-Temporal-orchestrated sandbox execution service with a FastAPI control plane and a dedicated Firecracker sandbox boundary.
+Temporal-orchestrated sandbox execution service with a FastAPI control plane and a dedicated AWS Lambda MicroVM sandbox boundary.
 
 ## What Is Implemented
 
@@ -8,11 +8,12 @@ Temporal-orchestrated sandbox execution service with a FastAPI control plane and
 - `GET /runs/{id}/events` streams projection updates as server-sent events and closes after a terminal status.
 - `MultiAgentWorkflow` models deterministic Temporal workflow steps.
 - Temporal activities perform external work and emit replay-safe structured traces.
-- `sandbox_executor` exposes a policy-enforcing execution boundary with a local Docker/gVisor executor option.
-- `spikes/firecracker_smoke` defines the first EC2 host validation gate for direct Firecracker execution.
-- `infra/terraform` provisions the private sandbox VPC, VPC endpoints, internal sandbox API load balancer, autoscaled `.metal` sandbox hosts, and Firecracker bootstrap checks.
+- `sandbox_executor` exposes a policy-enforcing execution boundary with a default local policy path and a Lambda MicroVM runtime path.
+- `sandbox_executor.microvm_broker` wraps the same `/execute` contract with one AWS Lambda MicroVM per sandbox attempt.
+- `Dockerfile.microvm` and `make package-microvm` create the Lambda MicroVM image artifact.
+- `infra/terraform` contains the AWS infrastructure for the Lambda MicroVM sandbox path.
 
-The default local executor is a policy smoke implementation. For local code execution on a Linux Docker host with gVisor installed, run the sandbox API with `TANGO_SANDBOX_BACKEND=docker-gvisor`. Production execution should stay behind the same `SandboxRequest`/`SandboxResult` boundary after the Firecracker smoke spike passes on target hosts.
+The default local executor is a policy smoke implementation for workflow and API testing only; do not use it for untrusted code execution. Production execution stays behind the same `SandboxRequest`/`SandboxResult` boundary and uses the Lambda MicroVM broker.
 
 ## Full Local Temporal End-To-End Test
 
@@ -42,38 +43,6 @@ Temporal listens on `localhost:7233`; the local UI is available at `http://local
 
 ```bash
 make run-sandbox
-```
-
-To execute code locally through Docker with gVisor instead of the policy smoke executor, install `runsc` on a Linux Docker host and use:
-
-```bash
-make run-sandbox-gvisor
-```
-
-On macOS, `runsc` is not installed as a native Docker runtime. Use a Linux VM, for example Lima:
-
-```bash
-make install-gvisor-macos
-make gvisor-macos-shell
-```
-
-Inside the Lima shell, run the sandbox API from the repo checkout:
-
-```bash
-make install
-make run-sandbox-gvisor
-```
-
-Minimal `runsc` install on a direct Ubuntu/Linux host:
-
-```bash
-sudo apt-get update && sudo apt-get install -y apt-transport-https ca-certificates curl gnupg docker.io
-curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
-sudo apt-get update && sudo apt-get install -y runsc
-sudo runsc install
-sudo systemctl restart docker
-docker run --rm --runtime=runsc hello-world
 ```
 
 4. Start the Temporal worker in Terminal 3:
@@ -127,45 +96,65 @@ Settings are read from environment variables with the `TANGO_` prefix:
 - `TANGO_TEMPORAL_NAMESPACE`: Temporal namespace. Default: `default`.
 - `TANGO_TEMPORAL_TASK_QUEUE`: worker task queue. Default: `tango-runs`.
 - `TANGO_SANDBOX_API_URL`: sandbox executor API URL. If unset, the sandbox activity uses the configured in-process sandbox backend.
-- `TANGO_SANDBOX_BACKEND`: `policy` for the default smoke executor or `docker-gvisor` for local Docker/gVisor execution. Default: `policy`.
-- `TANGO_SANDBOX_DOCKER_IMAGE`: Docker image used by the Docker/gVisor executor. Default: `python:3.12-slim`.
-- `TANGO_SANDBOX_DOCKER_RUNTIME`: Docker runtime used by the Docker/gVisor executor. Default: `runsc`.
-- `TANGO_SANDBOX_DOCKER_CPUS`, `TANGO_SANDBOX_DOCKER_MEMORY`, `TANGO_SANDBOX_DOCKER_PIDS_LIMIT`: local Docker/gVisor resource limits.
+- `TANGO_SANDBOX_API_AUTH`: `none` for unsigned local broker calls or `aws-iam` for an IAM-authenticated broker Lambda Function URL. Default: `none`.
+- `TANGO_SANDBOX_BACKEND`: `policy` for the default non-executing smoke path or `microvm-python` for code execution inside a Lambda MicroVM. Default: `policy`.
+- `TANGO_BROKER_TIMEOUT_SECONDS`: HTTP timeout for worker calls to the sandbox broker. Default: `30`.
+- `TANGO_AWS_REGION`: AWS Region for Lambda MicroVM API calls. Default: `us-east-1`.
+- `TANGO_LAMBDA_MICROVM_IMAGE_IDENTIFIER`: Lambda MicroVM image ARN or name used by the broker.
+- `TANGO_LAMBDA_MICROVM_IMAGE_VERSION`: optional pinned image version.
+- `TANGO_LAMBDA_MICROVM_EXECUTION_ROLE_ARN`: optional runtime role passed to `run-microvm`.
+- `TANGO_LAMBDA_MICROVM_AUTH_TOKEN_EXPIRATION_MINUTES`: endpoint auth token lifetime. Default: `5`.
+- `TANGO_LAMBDA_MICROVM_PORT`: application port inside each MicroVM. Default: `8080`.
+- `TANGO_LAMBDA_MICROVM_RUN_HOOK_PAYLOAD_ENABLED`: include non-secret run metadata in the MicroVM `runHookPayload` when `true`. Default: `false`.
+- `TANGO_LAMBDA_MICROVM_MAXIMUM_DURATION_SECONDS`: hard cap for one MicroVM attempt. Default: `60`.
 - `TANGO_TRACE_STDOUT`: emit trace JSON to stdout. Default: `true`.
 - `TANGO_TRACE_HTTP_URL`: optional HTTP trace sink.
 - `TANGO_MAX_INPUT_BYTES`, `TANGO_MAX_OUTPUT_BYTES`, `TANGO_SANDBOX_TIMEOUT_SECONDS`: local sandbox policy limits.
 
+## AWS Lambda MicroVM Sandbox Path
+
+Production sandbox execution uses AWS Lambda MicroVMs behind the same `SandboxRequest`/`SandboxResult` API used in local testing. The Temporal worker calls a stable sandbox HTTP URL through `TANGO_SANDBOX_API_URL`; in production that URL should point to the MicroVM broker.
+
+AWS provisioning, Terraform state, image build/update commands, broker Lambda packaging, and AWS smoke checks live in `infra/terraform/README.md`.
+
+To test the full Temporal flow against a locally running MicroVM broker, repeat the local end-to-end flow above with `TANGO_SANDBOX_API_URL=http://127.0.0.1:8081` on the worker.
+
+To test the full Temporal flow against the broker hosted as an AWS Lambda Function URL, deploy the AWS resources from `infra/terraform`, then run the worker with:
+
+```bash
+TANGO_SANDBOX_API_URL="<lambda_broker_function_url>" \
+TANGO_SANDBOX_API_AUTH=aws-iam \
+make run-worker
+```
+
+Start the API with `TANGO_TEMPORAL_START_ENABLED=true`, submit `/runs`, and verify the SSE projection as in the local flow. The API does not call the sandbox broker directly; the worker setting is the one that controls remote sandbox execution.
+
 ## Isolation Model
 
-Untrusted code must not run in the API or Temporal worker process. In local development, the Docker/gVisor backend runs one bounded container per attempt with `--runtime=runsc`, no network by default, a read-only root filesystem, tmpfs workspace, dropped capabilities, a non-root user, and CPU/memory/pid limits.
+Untrusted code must not run in the API or Temporal worker process. Local development defaults to the non-executing policy path.
 
-For production, workers call the internal sandbox API, and the sandbox host is responsible for creating one fresh Firecracker microVM per run attempt with:
+For production, the broker starts one Lambda MicroVM per sandbox attempt, sends the existing `SandboxRequest` to the MicroVM's dedicated `/execute` endpoint, and terminates the MicroVM in a cleanup path. The MicroVM image sets `TANGO_SANDBOX_BACKEND=microvm-python`, so untrusted code runs in a Python subprocess inside the isolated MicroVM. Endpoint access uses a short-lived Lambda MicroVM auth token scoped to port 8080. The broker requests an ingress connector for inbound `/execute` calls but does not request any egress connector, matching the default `allow_network=False` sandbox policy.
 
-- no guest network device by default;
-- read-only base image plus per-run writable overlay or tmpfs;
-- cgroup CPU/memory/process limits, disk quotas, and VM kill deadlines;
-- jailer/seccomp host confinement;
-- bounded inputs and outputs;
-- temporary state cleanup after execution.
+Each Lambda MicroVM attempt uses:
+
+- a fresh MicroVM lifecycle for each sandbox attempt;
+- an optional per-attempt `runHookPayload` containing non-secret run metadata;
+- the packaged Lambda MicroVM image artifact;
+- a scoped execution role;
+- a short-lived endpoint auth token;
+- bounded inputs, outputs, and execution timeout;
+- broker cleanup with `terminate-microvm` after success, failure, or timeout.
 
 Pooling is intentionally out of scope for the first secure implementation.
 
 ## Retry And Timeout Model
 
-Temporal workflows own durable orchestration. Workflow code must remain deterministic: no direct network calls, wall-clock reads, random values, or trace writes from replay paths. Activities own external effects and use bounded start-to-close, schedule-to-close, heartbeat, and retry settings.
+Temporal workflows own durable orchestration. Workflow code must remain deterministic: no direct network calls, wall-clock reads, random values, or trace writes from replay paths. Activities own external effects and use bounded start-to-close, schedule-to-close, heartbeat, and retry settings. Temporal history allows a run to resume after worker restarts without rerunning completed deterministic workflow decisions.
 
 Sandbox requests include `run_id` and `attempt_id` so retries do not reuse stale artifacts.
 
+For Lambda MicroVM execution, a retry creates a new MicroVM for the new sandbox activity attempt. The broker always calls `terminate-microvm` after success, failure, or timeout so a failed HTTP call does not leave compute running.
+
 ## Tracing
 
-Activities emit Langfuse-style trace events through `app.tracing`. Raw payloads and secret-like values are redacted by default. Large or sensitive inputs and outputs should be stored separately and referenced with `input_ref`/`output_ref`.
-
-## AWS Hardening
-
-Sandbox hosts belong in private subnets with no NAT gateway and no public IPs. Firecracker hosts must use KVM-capable EC2 `.metal` instances and pass bootstrap checks for `/dev/kvm`, matching Firecracker/jailer binaries, cgroups, swap policy, and required kernel/rootfs artifacts.
-
-Required AWS control-plane access should use VPC endpoints for SSM, EC2 messages, CloudWatch Logs, KMS, and S3. Instance roles should be least privilege, IMDSv2 is required, sandbox API ingress should flow through the internal load balancer, and break-glass operator access should go through audited SSM Session Manager.
-
-See `infra/terraform/README.md` for the AWS sandbox-host deployment baseline.
-
-AWS Lambda can be a simpler fallback when direct Firecracker lifecycle control is not required. Docker or gVisor is only a local development approximation for this threat model.
+Activities emit Langfuse-style trace events through `app.tracing`. Each event includes identifiers such as `trace_id`, `run_id`, `tenant_id`, `workflow_id`, `step`, `span_id`, `status`, and timing metadata. Raw payloads and secret-like values are redacted by default. Large or sensitive inputs and outputs should be stored separately and referenced with `input_ref`/`output_ref`.
